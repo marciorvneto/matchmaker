@@ -1,6 +1,4 @@
 export const TEMPLATES = {
-  demo: `{mass_balance} 2.34 = cos(t) - log(x/y)\n{ratio} t/x = 23\n{spec} t = 2`,
-
   evaporator: `// --- Single Evaporator Body ---
 
 // 1. Temperatures & Pressures
@@ -45,4 +43,5 @@ export const TEMPLATES = {
 {spec_hF} hF = 50
 {spec_hV} hV = 250
 {spec_hL} hL = 40`,
+  demo: `{mass_balance} 2.34 = cos(t) - log(x/y)\n{ratio} t/x = 23\n{spec} t = 2`,
 };

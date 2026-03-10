@@ -320,16 +320,12 @@
       <label for="exampleSelect">Load Template</label>
       <select id="exampleSelect" class="template-select">
         <option value="demo">Simple Demo</option>
-        <option value="evaporator">Single Evaporator</option>
+        <option value="evaporator" selected>Single Evaporator</option>
         <option value="flash">Flash Drum Separation</option>
       </select>
 
       <label for="equationsInput">System Definition</label>
-      <textarea id="equationsInput" spellcheck="false">
-{mass_balance} 2.34 = cos(t) - log(x/y)
-{ratio} t/x = 23
-{spec} t = 2
-      </textarea>
+      <textarea id="equationsInput" spellcheck="false"></textarea>
 
       <div class="btn-group">
         <button id="analyzeBtn">Compile & Match</button>
@@ -515,6 +511,9 @@ Waiting for WASM execution environment...</pre
             `<span class="warning">FATAL: Failed to initialize WebAssembly kernel.</span>`;
         }
       }
+
+      document.getElementById("equationsInput").value =
+        TEMPLATES[document.getElementById("exampleSelect").value];
 
       // Boot the app
       initializeApp();
