@@ -1,4 +1,6 @@
-
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <assert.h>
 #include <ctype.h>
 #include <stddef.h>
@@ -35,6 +37,7 @@ void *arena_allocate(Arena *a, size_t size) {
   }
   void *addr = a->base + a->offset;
   a->offset += aligned;
+  memset(addr, 0, size);
   return addr;
 }
 
@@ -384,20 +387,22 @@ void read_number(Arena *a, Tokenizer *t, Token *tok) {
   assert(t->tokens_count < MAX_TOKENS);
   char *buf = arena_allocate(a, MAX_NUM_SIZE);
   int decimal = 0;
-  size_t i = 0;
-  for (size_t i = 0; i < MAX_NUM_SIZE; i++) {
-    if (isdigit(t->string[t->pointer])) {
-      buf[i] = t->string[t->pointer++];
-      continue;
+  size_t len = 0;
+
+  for (size_t i = 0; i < MAX_NUM_SIZE - 1; i++) {
+    char c = t->string[t->pointer];
+    if (isdigit(c)) {
+      buf[len++] = c;
+      t->pointer++;
+    } else if (!decimal && c == '.') {
+      decimal = 1;
+      buf[len++] = c;
+      t->pointer++;
     } else {
-      if (!decimal && t->string[t->pointer] == '.') {
-        decimal = 1;
-        buf[i] = t->string[t->pointer++];
-        continue;
-      }
       break;
     }
   }
+  buf[len] = '\0';
   tok->value = buf;
 }
 
@@ -420,7 +425,8 @@ void read_id(Arena *a, Tokenizer *t, Token *tok) {
 
 void tokenize(Arena *a, Tokenizer *t, const char *text) {
   t->string = text;
-  while (t->pointer < strlen(text)) {
+  size_t text_len = strlen(text);
+  while (t->pointer < text_len) {
     char c = t->string[t->pointer];
     switch (c) {
     case '+': {
@@ -445,6 +451,16 @@ void tokenize(Arena *a, Tokenizer *t, const char *text) {
       break;
     }
     case '/': {
+      if (t->pointer + 1 < text_len && t->string[t->pointer + 1] == '/') {
+        // It's a comment! Skip everything until we hit the end of the line.
+        while (t->pointer < text_len && t->string[t->pointer] != '\n') {
+          t->pointer++;
+        }
+        // Note: We DO NOT consume the '\n' here. We let the loop break,
+        // and the next iteration will hit the '\n' case to cleanly divide
+        // equations!
+        break;
+      }
       Token tok;
       tok.type = TOKEN_SLASH;
       push_token(t, tok);
@@ -501,10 +517,13 @@ void tokenize(Arena *a, Tokenizer *t, const char *text) {
       break;
     }
     case '\n': {
+      while (t->pointer < text_len && t->string[t->pointer] == '\n') {
+        t->pointer++;
+        // Move pointer forward
+      }
       Token tok;
       tok.type = TOKEN_NEWLINE;
       push_token(t, tok);
-      t->pointer++;
       break;
     }
     default: {
@@ -617,7 +636,18 @@ SystemOfEquations *tokens_to_system(Arena *a, Token *tokens,
       i += 2;
       break;
     }
+    case TOKEN_END: {
+      // If the file ended with trailing newlines, the last equation
+      // might be completely empty. If so, just pop it off the system
+      if (eq->num_variables == 0 && eq->name == NULL) {
+        sys->num_equations--;
+      }
+      break;
+    }
     case TOKEN_NEWLINE: {
+      if (eq->num_variables == 0 && eq->name == NULL) {
+        break;
+      }
       eq = equation_create(a);
       eq->index = ++equation_index;
       sys->equations[sys->num_equations++] = eq;
@@ -641,10 +671,117 @@ SystemOfEquations *tokens_to_system(Arena *a, Token *tokens,
   return sys;
 }
 
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE char *analyze_system(const char *expression) {
+  static char output_buffer[32768]; // Expanded for larger systems
+  memset(output_buffer, 0, sizeof(output_buffer));
+  int offset = 0;
+
+  Arena a = arena_create();
+  Tokenizer t = {0};
+  tokenize(&a, &t, expression);
+
+  SystemOfEquations *sys = tokens_to_system(&a, t.tokens, t.tokens_count);
+  BipartiteGraph *g = graph_from_system_of_equations(&a, sys);
+  BipartiteGraph *matches = bipartite_matching(&a, g);
+
+  int is_well_posed = (matches->num_edges == sys->num_variables &&
+                       sys->num_equations == sys->num_variables);
+
+  offset +=
+      snprintf(output_buffer + offset, sizeof(output_buffer) - offset, "{\n");
+
+  // 1. Tokens
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  \"tokens\": [\n");
+  for (size_t i = 0; i < t.tokens_count; i++) {
+    const char *val = t.tokens[i].value ? t.tokens[i].value : "";
+    offset +=
+        snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                 "    {\"type\": %d, \"value\": \"%s\"}%s\n", t.tokens[i].type,
+                 val, (i == t.tokens_count - 1) ? "" : ",");
+  }
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  ],\n");
+
+  // 2. Stats
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  \"stats\": {\"equations\": %zu, \"variables\": %zu, "
+                     "\"well_posed\": %s},\n",
+                     sys->num_equations, sys->num_variables,
+                     is_well_posed ? "true" : "false");
+
+  // 3. Matches (for text formatting)
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  \"matches\": [\n");
+  for (size_t i = 0; i < matches->num_edges; i++) {
+    Edge e = matches->edges[i];
+    const char *eq_name = sys->equations[e.index_a]->name != NULL
+                              ? sys->equations[e.index_a]->name
+                              : "Unnamed";
+    offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                       "    {\"equation\": \"%s\", \"variable\": \"%s\"}%s\n",
+                       eq_name, sys->variables[e.index_b]->name,
+                       (i == matches->num_edges - 1) ? "" : ",");
+  }
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  ],\n");
+
+  // 4. Graph Nodes
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  \"nodes\": [\n");
+  for (size_t i = 0; i < sys->num_equations; i++) {
+    const char *eq_name =
+        sys->equations[i]->name != NULL ? sys->equations[i]->name : "Unnamed";
+    offset += snprintf(
+        output_buffer + offset, sizeof(output_buffer) - offset,
+        "    {\"id\": \"eq_%zu\", \"name\": \"%s\", \"group\": "
+        "\"equation\"}%s\n",
+        i, eq_name,
+        (i == sys->num_equations - 1 && sys->num_variables == 0) ? "" : ",");
+  }
+  for (size_t i = 0; i < sys->num_variables; i++) {
+    offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                       "    {\"id\": \"var_%zu\", \"name\": \"%s\", \"group\": "
+                       "\"variable\"}%s\n",
+                       i, sys->variables[i]->name,
+                       (i == sys->num_variables - 1) ? "" : ",");
+  }
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  ],\n");
+
+  // 5. Graph Links
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  \"links\": [\n");
+  for (size_t i = 0; i < g->num_edges; i++) {
+    Edge e = g->edges[i];
+    int is_match = 0;
+    for (size_t j = 0; j < matches->num_edges; j++) {
+      if (matches->edges[j].index_a == e.index_a &&
+          matches->edges[j].index_b == e.index_b) {
+        is_match = 1;
+        break;
+      }
+    }
+    offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                       "    {\"source\": \"eq_%zu\", \"target\": \"var_%zu\", "
+                       "\"is_match\": %s}%s\n",
+                       e.index_a, e.index_b, is_match ? "true" : "false",
+                       (i == g->num_edges - 1) ? "" : ",");
+  }
+  offset += snprintf(output_buffer + offset, sizeof(output_buffer) - offset,
+                     "  ]\n}\n");
+
+  arena_destroy(&a);
+  return output_buffer;
+}
+#endif // __EMSCRIPTEN__
+
 int main() {
   Arena a = arena_create();
 
-  const char *expression = "{eq1_asd}  2.34 = cos(t) - log(x/y)\nt/x = 23\nt=2";
+  const char *expression = "{mass_balance} 2.34 = cos(t) - log(x/y)\n{ratio}"
+                           "t/x = 23\n\n\n\n{spec} t = 2";
   Tokenizer t = {0};
   tokenize(&a, &t, expression);
 
