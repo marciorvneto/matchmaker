@@ -1,5 +1,6 @@
 
 #include <assert.h>
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -225,9 +226,11 @@ typedef struct {
 } Variable;
 
 typedef struct {
+  const char *name;
   size_t index;
   size_t num_variables;
   Variable *variables[MAX_NUM_VARIABLES];
+  Hash *variables_set;
 } Equation;
 
 typedef struct {
@@ -240,6 +243,8 @@ typedef struct {
 
 Equation *equation_create(Arena *a) {
   Equation *eq = arena_allocate(a, sizeof(Equation));
+  eq->variables_set = create_set(a);
+  eq->name = NULL;
   return eq;
 }
 
@@ -247,6 +252,18 @@ Variable *variable_create(Arena *a, const char *variable_name) {
   Variable *var = arena_allocate(a, sizeof(Variable));
   var->name = variable_name;
   return var;
+}
+
+void push_variable_to_equation(Arena *a, SystemOfEquations *sys, Equation *eq,
+                               const char *variable_name) {
+  if (hash_has_element(eq->variables_set, variable_name))
+    return;
+  // Assumes the system knows about it!
+  int idx = hash_get_element(sys->variables_set, variable_name);
+  if (idx < 0)
+    return;
+  hash_put_element(sys->variables_set, variable_name, idx);
+  eq->variables[eq->num_variables++] = sys->variables[idx];
 }
 
 void push_variable(Arena *a, SystemOfEquations *sys,
@@ -259,46 +276,12 @@ void push_variable(Arena *a, SystemOfEquations *sys,
   hash_put_element(sys->variables_set, variable_name, var->index);
 }
 
-void push_equation(Arena *a, SystemOfEquations *sys, Equation *eq) {
-  eq->index = sys->num_variables;
-  sys->equations[sys->num_equations++] = eq;
-}
-
 SystemOfEquations *system_of_equations_create(Arena *a) {
   SystemOfEquations *sys = arena_allocate(a, sizeof(SystemOfEquations));
   sys->variables_set = create_set(a);
   sys->num_variables = 0;
   sys->num_equations = 0;
   return sys;
-}
-
-void init_system_of_equations(Arena *a, SystemOfEquations *sys,
-                              size_t num_equations,
-                              const char ***equation_variables,
-                              size_t *num_equation_variables) {
-
-  // Registering equations and binding them to variables
-
-  for (size_t eq_idx = 0; eq_idx < num_equations; eq_idx++) {
-    Equation *eq = equation_create(a);
-    eq->index = eq_idx;
-    sys->equations[sys->num_equations++] = eq;
-
-    // Registering equation variables
-
-    for (size_t var_idx = 0; var_idx < num_equation_variables[eq_idx];
-         var_idx++) {
-      const char *variable_name = equation_variables[eq_idx][var_idx];
-      int element = hash_get_element(sys->variables_set, variable_name);
-      if (element < 0) {
-        push_variable(a, sys, variable_name);
-        element = hash_get_element(sys->variables_set, variable_name);
-      }
-      size_t var_idx_in_soe = element;
-      Variable *var = sys->variables[var_idx_in_soe];
-      eq->variables[eq->num_variables++] = var;
-    }
-  }
 }
 
 void print_system_of_equations(SystemOfEquations *sys) {
@@ -316,7 +299,11 @@ void print_system_of_equations(SystemOfEquations *sys) {
   for (size_t i = 0; i < sys->num_equations; i++) {
     Equation *eq = sys->equations[i];
     printf("  ");
-    printf("[%zu] ", i);
+    if (eq->name != NULL) {
+      printf("[%s] ", eq->name);
+    } else {
+      printf("[%zu] ", i);
+    }
     for (size_t var_idx = 0; var_idx < eq->num_variables; var_idx++) {
       Variable *var = eq->variables[var_idx];
       printf("%s", var->name);
@@ -356,6 +343,8 @@ BipartiteGraph *graph_from_system_of_equations(Arena *a,
 //==============================
 
 #define MAX_TOKENS 1024
+#define MAX_NUM_SIZE 128
+#define MAX_ID_SIZE 128
 typedef enum {
   TOKEN_NUMBER,
   TOKEN_IDENTIFIER,
@@ -366,8 +355,12 @@ typedef enum {
   TOKEN_CARET,
   TOKEN_LPAREN,
   TOKEN_RPAREN,
+  TOKEN_LCURLY,
+  TOKEN_RCURLY,
   TOKEN_COMMA,
-  TOKEN_EQUALS
+  TOKEN_EQUALS,
+  TOKEN_NEWLINE,
+  TOKEN_END,
 } token_t;
 
 typedef struct {
@@ -387,107 +380,286 @@ void push_token(Tokenizer *t, Token tok) {
   t->tokens[t->tokens_count++] = tok;
 }
 
-void tokenize(const char *text) {
-  Tokenizer t = {0};
-  t.string = text;
-  while (t.pointer < strlen(text)) {
-    char c = t.string[t.pointer++];
+void read_number(Arena *a, Tokenizer *t, Token *tok) {
+  assert(t->tokens_count < MAX_TOKENS);
+  char *buf = arena_allocate(a, MAX_NUM_SIZE);
+  int decimal = 0;
+  size_t i = 0;
+  for (size_t i = 0; i < MAX_NUM_SIZE; i++) {
+    if (isdigit(t->string[t->pointer])) {
+      buf[i] = t->string[t->pointer++];
+      continue;
+    } else {
+      if (!decimal && t->string[t->pointer] == '.') {
+        decimal = 1;
+        buf[i] = t->string[t->pointer++];
+        continue;
+      }
+      break;
+    }
+  }
+  tok->value = buf;
+}
+
+void read_id(Arena *a, Tokenizer *t, Token *tok) {
+  assert(t->tokens_count < MAX_TOKENS);
+  char *buf = arena_allocate(a, MAX_NUM_SIZE);
+  size_t i = 0;
+  for (size_t i = 0; i < MAX_NUM_SIZE; i++) {
+    char c = t->string[t->pointer];
+    if (isalpha(c) || isdigit(c) || c == '_') {
+      buf[i] = c;
+      t->pointer++;
+      continue;
+    } else {
+      break;
+    }
+  }
+  tok->value = buf;
+}
+
+void tokenize(Arena *a, Tokenizer *t, const char *text) {
+  t->string = text;
+  while (t->pointer < strlen(text)) {
+    char c = t->string[t->pointer];
     switch (c) {
     case '+': {
       Token tok;
       tok.type = TOKEN_PLUS;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case '-': {
       Token tok;
       tok.type = TOKEN_MINUS;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case '*': {
       Token tok;
       tok.type = TOKEN_STAR;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case '/': {
       Token tok;
       tok.type = TOKEN_SLASH;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case '^': {
       Token tok;
       tok.type = TOKEN_CARET;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case '(': {
       Token tok;
       tok.type = TOKEN_LPAREN;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case ')': {
       Token tok;
       tok.type = TOKEN_RPAREN;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
+      break;
+    }
+    case '{': {
+      Token tok;
+      tok.type = TOKEN_LCURLY;
+      push_token(t, tok);
+      t->pointer++;
+      break;
+    }
+    case '}': {
+      Token tok;
+      tok.type = TOKEN_RCURLY;
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case '=': {
       Token tok;
       tok.type = TOKEN_EQUALS;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
       break;
     }
     case ',': {
       Token tok;
       tok.type = TOKEN_COMMA;
-      push_token(&t, tok);
+      push_token(t, tok);
+      t->pointer++;
+      break;
+    }
+    case '\n': {
+      Token tok;
+      tok.type = TOKEN_NEWLINE;
+      push_token(t, tok);
+      t->pointer++;
+      break;
+    }
+    default: {
+      if (isdigit(c)) {
+        // Pointer gets incremented in read_number
+        Token tok;
+        tok.type = TOKEN_NUMBER;
+        read_number(a, t, &tok);
+        push_token(t, tok);
+        break;
+      }
+      if (isalpha(c)) {
+        // Pointer gets incremented in read_id
+        Token tok;
+        tok.type = TOKEN_IDENTIFIER;
+        read_id(a, t, &tok);
+        push_token(t, tok);
+        break;
+      }
+      t->pointer++;
       break;
     }
     }
   }
+  Token end;
+  end.type = TOKEN_END;
+  t->tokens[t->tokens_count++] = end;
+}
+
+void print_token(Token *t) {
+  switch (t->type) {
+  case TOKEN_NUMBER: {
+    printf("TOKEN_NUMBER: %s\n", t->value);
+    break;
+  }
+  case TOKEN_IDENTIFIER: {
+    printf("TOKEN_IDENTIFIER: %s\n", t->value);
+    break;
+  }
+  case TOKEN_PLUS: {
+    printf("TOKEN_PLUS\n");
+    break;
+  }
+  case TOKEN_MINUS: {
+    printf("TOKEN_MINUS\n");
+    break;
+  }
+  case TOKEN_STAR: {
+    printf("TOKEN_STAR\n");
+    break;
+  }
+  case TOKEN_SLASH: {
+    printf("TOKEN_SLASH\n");
+    break;
+  }
+  case TOKEN_CARET: {
+    printf("TOKEN_CARET\n");
+    break;
+  }
+  case TOKEN_LPAREN: {
+    printf("TOKEN_LPAREN\n");
+    break;
+  }
+  case TOKEN_RPAREN: {
+    printf("TOKEN_RPAREN\n");
+    break;
+  }
+  case TOKEN_LCURLY: {
+    printf("TOKEN_LCURLY\n");
+    break;
+  }
+  case TOKEN_RCURLY: {
+    printf("TOKEN_RCURLY\n");
+    break;
+  }
+  case TOKEN_COMMA: {
+    printf("TOKEN_EQUALS\n");
+    break;
+  }
+  case TOKEN_EQUALS: {
+    printf("TOKEN_EQUALS\n");
+    break;
+  }
+  case TOKEN_NEWLINE: {
+    printf("TOKEN_NEWLINE\n");
+    break;
+  }
+  case TOKEN_END: {
+    printf("TOKEN_END\n");
+    break;
+  }
+  }
+}
+
+SystemOfEquations *tokens_to_system(Arena *a, Token *tokens,
+                                    size_t tokens_count) {
+  SystemOfEquations *sys = system_of_equations_create(a);
+
+  size_t equation_index = 0;
+  Equation *eq = equation_create(a);
+  const char *eq_name = NULL;
+  eq->index = equation_index;
+  sys->equations[sys->num_equations++] = eq;
+  for (size_t i = 0; i < tokens_count; i++) {
+    Token *tok = &tokens[i];
+    switch (tok->type) {
+    case TOKEN_LCURLY: {
+      Token *id = &tokens[i + 1];
+      eq->name = id->value;
+      i += 2;
+      break;
+    }
+    case TOKEN_NEWLINE: {
+      eq = equation_create(a);
+      eq->index = ++equation_index;
+      sys->equations[sys->num_equations++] = eq;
+      break;
+    }
+    case TOKEN_IDENTIFIER: {
+      if (tokens[i + 1].type == TOKEN_LPAREN) {
+        // Function call
+        continue;
+      }
+      int element = hash_get_element(sys->variables_set, tok->value);
+      push_variable(a, sys, tok->value);
+      push_variable_to_equation(a, sys, eq, tok->value);
+      break;
+    }
+    default: {
+      break;
+    }
+    }
+  }
+  return sys;
 }
 
 int main() {
   Arena a = arena_create();
 
-  //  e(x*y/z) - x^2 = 3
-  //  x*z = 2
-  //  z = 2
+  const char *expression = "{eq1_asd}  2.34 = cos(t) - log(x/y)\nt/x = 23\nt=2";
+  Tokenizer t = {0};
+  tokenize(&a, &t, expression);
 
-  // const char ***equation_vars = arena_allocate(&a, 3 * sizeof(char **));
-  // equation_vars[0] = arena_allocate(&a, 3 * sizeof(char *));
-  // equation_vars[0][0] = "x";
-  // equation_vars[0][1] = "y";
-  // equation_vars[0][2] = "z";
-  //
-  // equation_vars[1] = arena_allocate(&a, 2 * sizeof(char *));
-  // equation_vars[1][0] = "x";
-  // equation_vars[1][1] = "z";
-  //
-  // equation_vars[2] = arena_allocate(&a, 1 * sizeof(char *));
-  // equation_vars[2][0] = "z";
-  //
-  // size_t *num_eq_vars = arena_allocate(&a, 3 * sizeof(size_t));
-  // num_eq_vars[0] = 3;
-  // num_eq_vars[1] = 2;
-  // num_eq_vars[2] = 1;
-  //
-  // SystemOfEquations *soe = system_of_equations_create(&a);
-  //
-  // init_system_of_equations(&a, soe, 3, equation_vars, num_eq_vars);
-  // print_system_of_equations(soe);
-  // BipartiteGraph *g = graph_from_system_of_equations(&a, soe);
-  // graph_print(g);
-  //
-  // BipartiteGraph *matches = bipartite_matching(&a, g);
-  // graph_print(matches);
+  for (size_t i = 0; i < t.tokens_count; i++) {
+    print_token(&t.tokens[i]);
+  }
 
-  const char *expression = "2.34 = cos(t) - log(x/y)";
-  tokenize(expression);
+  SystemOfEquations *sys = tokens_to_system(&a, t.tokens, t.tokens_count);
+  print_system_of_equations(sys);
+
+  BipartiteGraph *g = graph_from_system_of_equations(&a, sys);
+  graph_print(g);
+
+  BipartiteGraph *matches = bipartite_matching(&a, g);
+  graph_print(matches);
 
   arena_destroy(&a);
 
