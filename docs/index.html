@@ -130,6 +130,7 @@
         white-space: pre-wrap;
         margin: 0;
         line-height: 1.5;
+        min-height: 120px;
       }
 
       /* Footer */
@@ -179,7 +180,8 @@
         transition:
           width 0.3s ease,
           padding 0.3s ease,
-          opacity 0.2s ease;
+          opacity 0.2s ease,
+          height 0.3s ease;
         overflow: hidden;
         padding: 20px;
       }
@@ -278,6 +280,37 @@
       .template-select:focus {
         border-color: #58a6ff;
       }
+
+      /* MOBILE RESPONSIVENESS */
+      @media (max-width: 800px) {
+        body {
+          flex-direction: column;
+          overflow-y: auto;
+        }
+        .sidebar {
+          width: 100%;
+          border-right: none;
+          border-bottom: 1px solid #30363d;
+          flex-shrink: 0;
+        }
+        .main-content {
+          width: 100%;
+          height: 60vh; /* Fixed viewport chunk for the graph on mobile */
+          flex-shrink: 0;
+        }
+        .tokens-panel {
+          width: 100%;
+          border-left: none;
+          border-top: 1px solid #30363d;
+          height: 300px;
+          flex-shrink: 0;
+        }
+        .tokens-panel.collapsed {
+          height: 0;
+          padding: 0;
+          border: none;
+        }
+      }
     </style>
   </head>
   <body>
@@ -309,15 +342,15 @@ Waiting for WASM execution environment...</pre
       >
 
       <div class="footer">
-        KERNEL VER 1.0.0<br />
+        Built by Marcio R. V. Neto<br />
         Powered by
         <a href="https://voimatoolbox.com/en-beta" target="_blank"
           >Voima Toolbox</a
         ><br />
         <a href="https://github.com/marciorvneto/matchmaker" target="_blank"
-          >GitHub</a
+          >GitHub Repo</a
         >
-        • <a href="mailto:youremail@example.com">Contact</a>
+        &bull; <a href="mailto:marcio@voimatoolbox.com">Contact</a>
       </div>
     </div>
 
@@ -330,58 +363,9 @@ Waiting for WASM execution environment...</pre
       <div class="tokens-list" id="tokenList"></div>
     </div>
 
-    <script src="matchmaker.js"></script>
-    <script>
-      const TEMPLATES = {
-        demo: `{mass_balance} 2.34 = cos(t) - log(x/y)\n{ratio} t/x = 23\n{spec} t = 2`,
-
-        evaporator: `// --- Single Evaporator Body (n=1) ---
-// Extracted from PhD NR Solver
-
-// 1. Temperatures & Pressures
-{T_liquid} TL = Tsat(PV) + BPR(xL, Tsat(PV))
-{T_vapor} TV = TL
-
-// 2. Mass Balances
-{mass_liq} mL = mF * (xF / xL)
-{mass_vap} mV = mF - mL
-
-// 3. Condensate & Heat Transfer
-{P_cond} PC = PS
-{T_cond} TC = Tsat(PS)
-{m_cond} mC = mS
-{Heat} Q = U * A * (TC - TL)
-
-// 4. Energy Balances (Residuals)
-// Using function calls for enthalpies to link properties directly to state variables!
-{Energy_Liq} (mF * h_liq(xF, TF)) + Q = (mL * h_liq(xL, TL)) + (mV * h_vap(TV, PV))
-{Energy_Vap} mS * h_satV(TS, PS) = Q + (mC * h_satL(TC, PC))
-
-// 5. System Specifications (Knowns)
-{spec_mF} mF = 100
-{spec_xF} xF = 0.15
-{spec_TF} TF = 25
-{spec_PS} PS = 250
-{spec_TS} TS = 127
-{spec_U} U = 2.5
-{spec_PV} PV = 50
-{spec_xL} xL = 0.55`,
-
-        flash: `// --- Flash Drum Separation ---
-{overall_mass} F = V + L
-{component_mass} F * z = (V * y) + (L * x)
-{equilibrium} y = K * x
-{energy} (F * hF) + Q = (V * hV) + (L * hL)
-
-// Specifications
-{spec_F} F = 100
-{spec_z} z = 0.5
-{spec_Q} Q = 0
-{spec_K} K = 2.5
-{spec_hF} hF = 50
-{spec_hV} hV = 250
-{spec_hL} hL = 40`,
-      };
+    <script type="module">
+      import { TEMPLATES } from "./templates.js";
+      import loadWASM from "./matchmaker.js"; // Import the C engine as a module!
 
       const TOKEN_TYPES = [
         "NUMBER",
@@ -409,116 +393,131 @@ Waiting for WASM execution environment...</pre
         .addEventListener("click", () => {
           const panel = document.getElementById("tokensPanel");
           panel.classList.toggle("collapsed");
-
-          // Wait for CSS transition to finish, then resize the canvas
           setTimeout(() => {
             if (Graph) {
               const graphElem = document.getElementById("graph");
-              Graph.width(graphElem.clientWidth);
+              Graph.width(graphElem.clientWidth).height(graphElem.clientHeight);
             }
           }, 300);
         });
 
       // Predefined systems logic
-
       document
         .getElementById("exampleSelect")
         .addEventListener("change", (e) => {
           const templateKey = e.target.value;
           document.getElementById("equationsInput").value =
             TEMPLATES[templateKey];
-          // Auto-run the analysis when a template is selected
           document.getElementById("analyzeBtn").click();
         });
 
-      Module.onRuntimeInitialized = () => {
-        const analyzeSystem = Module.cwrap("analyze_system", "string", [
-          "string",
-        ]);
+      // --- The Modern Async WASM Initialization ---
+      async function initializeApp() {
+        try {
+          // Await the WebAssembly compilation natively! No race conditions.
+          const Module = await loadWASM();
+          const analyzeSystem = Module.cwrap("analyze_system", "string", [
+            "string",
+          ]);
 
-        document.getElementById("analyzeBtn").addEventListener("click", () => {
-          const equations = document.getElementById("equationsInput").value;
-          if (!equations.trim()) return;
+          document
+            .getElementById("analyzeBtn")
+            .addEventListener("click", () => {
+              const equations = document.getElementById("equationsInput").value;
+              if (!equations.trim()) return;
 
-          const rawJson = analyzeSystem(equations);
-          const data = JSON.parse(rawJson);
+              const rawJson = analyzeSystem(equations);
+              const data = JSON.parse(rawJson);
 
-          // Populate Token Stream
-          const tokenList = document.getElementById("tokenList");
-          tokenList.innerHTML = "";
-          data.tokens.forEach((t) => {
-            const div = document.createElement("div");
-            div.className = "token-item";
+              // Populate Token Stream
+              const tokenList = document.getElementById("tokenList");
+              tokenList.innerHTML = "";
+              data.tokens.forEach((t) => {
+                const div = document.createElement("div");
+                div.className = "token-item";
 
-            let displayValue = t.value;
-            if (t.type === 13) displayValue = "\\n";
-            if (t.type === 14) displayValue = "EOF";
+                let displayValue = t.value;
+                if (t.type === 13) displayValue = "\\n";
+                if (t.type === 14) displayValue = "EOF";
 
-            div.innerHTML = `
-                        <span class="token-type">${TOKEN_TYPES[t.type]}</span>
-                        <span class="token-value">${displayValue}</span>
-                    `;
-            tokenList.appendChild(div);
-          });
-
-          // Format Console Output
-          let out = `--- KERNEL ANALYSIS ---\n`;
-          out += `EQN_COUNT : <span class="highlight">${data.stats.equations}</span>\n`;
-          out += `VAR_COUNT : <span class="highlight">${data.stats.variables}</span>\n\n`;
-
-          out += "--- INCIDENCE MATCHING ---\n";
-          data.matches.forEach((m) => {
-            out += `[${m.equation}] -> ${m.variable}\n`;
-          });
-
-          if (data.stats.well_posed) {
-            out += `\n<span class="success">[SYS_OK] Structural degrees of freedom = 0.</span>`;
-          } else {
-            out += `\n<span class="warning">[SYS_ERR] Matrix is structurally singular.</span>`;
-          }
-          document.getElementById("textOutput").innerHTML = out;
-
-          // Render Technical Spiderman Graph
-          const graphElem = document.getElementById("graph");
-          if (!Graph) {
-            Graph = ForceGraph()(graphElem)
-              .width(graphElem.clientWidth)
-              .height(graphElem.clientHeight)
-              .nodeId("id")
-              .backgroundColor("#0d1117") // GitHub dark background
-              .linkColor((link) => (link.is_match ? "#3fb950" : "#30363d")) // Match=Green, Normal=Faint Grey
-              .linkWidth((link) => (link.is_match ? 2 : 1))
-              .linkDirectionalParticles((link) => (link.is_match ? 3 : 0))
-              .linkDirectionalParticleSpeed(0.008)
-              .nodeCanvasObject((node, ctx, globalScale) => {
-                const label = node.name;
-                const fontSize = 16 / globalScale;
-                ctx.font = `${fontSize}px 'JetBrains Mono', monospace`;
-
-                // Technical Colors: Steel Blue (Eq) and Coral/Orange (Var)
-                ctx.fillStyle =
-                  node.group === "equation" ? "#58a6ff" : "#f78166";
-                ctx.beginPath();
-                if (node.group === "equation") {
-                  const size = 5;
-                  ctx.rect(node.x - size / 2, node.y - size / 2, size, size);
-                } else {
-                  ctx.arc(node.x, node.y, 2.5, 0, 2 * Math.PI, false);
-                }
-                ctx.fill();
-
-                ctx.textAlign = "center";
-                ctx.textBaseline = "top";
-                ctx.fillStyle = "#8b949e";
-                ctx.fillText(label, node.x, node.y + 4);
+                div.innerHTML = `
+                <span class="token-type">${TOKEN_TYPES[t.type]}</span>
+                <span class="token-value">${displayValue}</span>
+              `;
+                tokenList.appendChild(div);
               });
-          }
 
-          Graph.graphData({ nodes: data.nodes, links: data.links });
-        });
+              // Format Console Output
+              let out = `--- KERNEL ANALYSIS ---\n`;
+              out += `EQN_COUNT : <span class="highlight">${data.stats.equations}</span>\n`;
+              out += `VAR_COUNT : <span class="highlight">${data.stats.variables}</span>\n\n`;
 
-        document.getElementById("analyzeBtn").click();
-      };
+              out += "--- INCIDENCE MATCHING ---\n";
+              data.matches.forEach((m) => {
+                out += `[${m.equation}] -> ${m.variable}\n`;
+              });
+
+              if (data.stats.well_posed) {
+                out += `\n<span class="success">[SYS_OK] Structural degrees of freedom = 0.</span>`;
+              } else {
+                out += `\n<span class="warning">[SYS_ERR] Matrix is structurally singular.</span>`;
+              }
+              document.getElementById("textOutput").innerHTML = out;
+
+              // Render Technical Spiderman Graph
+              const graphElem = document.getElementById("graph");
+              if (!Graph) {
+                Graph = ForceGraph()(graphElem)
+                  .width(graphElem.clientWidth)
+                  .height(graphElem.clientHeight)
+                  .nodeId("id")
+                  .backgroundColor("#0d1117")
+                  .linkColor((link) => (link.is_match ? "#3fb950" : "#30363d"))
+                  .linkWidth((link) => (link.is_match ? 2 : 1))
+                  .linkDirectionalParticles((link) => (link.is_match ? 3 : 0))
+                  .linkDirectionalParticleSpeed(0.008)
+                  .nodeCanvasObject((node, ctx, globalScale) => {
+                    const label = node.name;
+                    const fontSize = 16 / globalScale;
+                    ctx.font = `${fontSize}px 'JetBrains Mono', monospace`;
+
+                    ctx.fillStyle =
+                      node.group === "equation" ? "#58a6ff" : "#f78166";
+                    ctx.beginPath();
+                    if (node.group === "equation") {
+                      const size = 5;
+                      ctx.rect(
+                        node.x - size / 2,
+                        node.y - size / 2,
+                        size,
+                        size,
+                      );
+                    } else {
+                      ctx.arc(node.x, node.y, 2.5, 0, 2 * Math.PI, false);
+                    }
+                    ctx.fill();
+
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "top";
+                    ctx.fillStyle = "#8b949e";
+                    ctx.fillText(label, node.x, node.y + 4);
+                  });
+              }
+
+              Graph.graphData({ nodes: data.nodes, links: data.links });
+            });
+
+          // Everything is wired up, run the first analysis!
+          document.getElementById("analyzeBtn").click();
+        } catch (err) {
+          console.error("Failed to load WASM Engine:", err);
+          document.getElementById("textOutput").innerHTML =
+            `<span class="warning">FATAL: Failed to initialize WebAssembly kernel.</span>`;
+        }
+      }
+
+      // Boot the app
+      initializeApp();
 
       window.addEventListener("resize", () => {
         if (Graph) {
